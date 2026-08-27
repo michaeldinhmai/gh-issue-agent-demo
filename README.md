@@ -24,9 +24,9 @@ Most "AI-powered" tooling is a single prompt with a single response. An agent is
 
 | Tool | Backed by | Returns |
 |---|---|---|
-| `list_issues(state, labels, assignee)` | `GET /repos/{owner}/{repo}/issues` | Number, title, state, labels, assignee, comment count, timestamps, truncated body |
-| `find_stale_issues(days, state, labels)` | the same endpoint, plus arithmetic | The same projection, filtered to issues untouched for `days` days, each carrying a computed `stale_days` |
-| `get_issue_comments(issue_number)` | `GET /repos/{owner}/{repo}/issues/{n}/comments` | Author, timestamp, and body for each comment |
+| `list_issues(state, labels, assignee)` | `GET /repos/{owner}/{repo}/issues` | `count`, the `filters` applied, and `issues[]` — number, title, state, labels, assignee, comment count, timestamps, truncated body |
+| `find_stale_issues(days, state, labels)` | the same endpoint, plus arithmetic | `as_of`, `threshold_days`, `count`, and `issues[]` filtered to those untouched for `days` days, each with a computed `stale_days` |
+| `get_issue_comments(issue_number)` | `GET /repos/{owner}/{repo}/issues/{n}/comments` | `issue_number`, `comment_count`, and `comments[]` — author, timestamp, body |
 
 All three are ordinary Python functions calling the GitHub REST API with `requests`. None of them knows anything about Claude.
 
@@ -88,8 +88,6 @@ flowchart TB
 The only thing that differs is *whose process the loop runs in*. Everything below the fork is shared, byte for byte: one `github_tools.py`, three functions, no model SDK imported anywhere in it. That separation is not tidiness, it is the reason the same tools serve a CLI and Claude Desktop without a rewrite.
 
 What you trade going from A to B: the host takes over the system prompt, the model choice, the turn budget, and the trace. You gain distribution and delete about sixty lines. **MCP buys reach, and costs control** — which is why this repo keeps both rather than replacing one with the other.
-
-**The arrow from `BACK` to `API` is the entire idea.** Everything else is a single API call. That one edge — feed the result back and ask again — is what turns a prompt into an agent. The model sees what its own request returned and decides what to do next.
 
 ### A real run, turn by turn
 
