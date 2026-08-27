@@ -50,17 +50,64 @@ Change the question and the plan changes. Asked *"anything gone stale we should 
 
 ## How the loop works
 
+```mermaid
+flowchart TD
+    Q["Your question<br/><i>what is blocked right now and why</i>"] --> API
+
+    API["<b>POST /v1/messages</b><br/>whole conversation so far<br/>+ the 3 tool schemas"]
+
+    API --> STOP{"stop_reason?"}
+
+    STOP -->|"<b>tool_use</b><br/>model wants data first"| EXEC
+
+    EXEC["Run the matching Python function<br/>list_issues · find_stale_issues · get_issue_comments"]
+    EXEC --> GH[("GitHub<br/>Issues API")]
+    GH --> BACK["Append every tool_result<br/><b>in ONE user message</b>"]
+    BACK --> API
+
+    STOP -->|"<b>end_turn</b><br/>model has enough"| ANS["Final answer"]
+
+    style Q fill:#e8f0fe,stroke:#4285f4,color:#000
+    style ANS fill:#e6f4ea,stroke:#34a853,color:#000
+    style STOP fill:#fef7e0,stroke:#f9ab00,color:#000
+    style GH fill:#f1f3f4,stroke:#5f6368,color:#000
 ```
-question ──> messages.create(tools=[...])
-                     │
-                     ├─ stop_reason == "tool_use"  ──> run the functions
-                     │                                  append results
-                     │                                  loop  ─────┐
-                     │                                             │
-                     └─ stop_reason == "end_turn"  ──> final text  │
-                             ▲                                     │
-                             └─────────────────────────────────────┘
+
+**The arrow from `BACK` to `API` is the entire idea.** Everything else is a single API call. That one edge — feed the result back and ask again — is what turns a prompt into an agent. The model sees what its own request returned and decides what to do next.
+
+### A real run, turn by turn
+
+This is an actual trace, not an illustration. Nothing in the code chose these calls.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant You
+    participant Loop as agent.py
+    participant Claude
+    participant GH as GitHub
+
+    You->>Loop: what is blocked right now and why
+    Loop->>Claude: question + 3 tool schemas
+
+    Note over Claude: Picks a filter on its own.<br/>No keyword matching in the code.
+    Claude-->>Loop: tool_use — list_issues(labels="blocked")
+    Loop->>GH: GET /issues?labels=blocked
+    GH-->>Loop: issues 1, 5, 8
+    Loop->>Claude: tool_result — 3 issues
+
+    Note over Claude: Titles say WHAT is blocked.<br/>None of them say WHY.<br/>So: go read the threads.
+    Claude-->>Loop: 3 tool_use blocks at once — comments on 1, 5, 8
+    Loop->>GH: 3 parallel GETs
+    GH-->>Loop: comment threads
+    Loop->>Claude: 3 tool_results, one message
+
+    Note over Claude: Now it has the reasons.
+    Claude-->>Loop: end_turn + answer
+    Loop-->>You: blocked on vendor VS-4471, on PLAT-882,<br/>and issue 8 is waiting on issue 10
 ```
+
+Step 7 is the one worth pointing at in an interview: the model read a list, judged it insufficient, and issued three more calls *in parallel* to fill the gap. That decision lives nowhere in this repository.
 
 Step by step, in `ask()`:
 
