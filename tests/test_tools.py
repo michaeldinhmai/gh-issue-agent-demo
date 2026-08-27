@@ -9,6 +9,7 @@ import datetime
 import pytest
 
 import agent
+import github_tools
 
 UTC = datetime.timezone.utc
 
@@ -41,7 +42,7 @@ def fake_gh(monkeypatch):
 
     _fake.payload = []
     _fake.calls = calls
-    monkeypatch.setattr(agent, "_gh", _fake)
+    monkeypatch.setattr(github_tools, "_gh", _fake)
     return _fake
 
 
@@ -52,7 +53,7 @@ def fake_gh(monkeypatch):
 def test_projection_keeps_only_the_documented_fields(fake_gh):
     fake_gh.payload = [raw_issue()]
 
-    issue = agent.list_issues()[0]
+    issue = github_tools.list_issues()[0]
 
     assert set(issue) == {
         "number", "title", "state", "labels", "assignee",
@@ -69,19 +70,19 @@ def test_pull_requests_are_dropped(fake_gh):
         raw_issue(number=2, pull_request={"url": "https://api.github.com/..."}),
     ]
 
-    assert [i["number"] for i in agent.list_issues()] == [1]
+    assert [i["number"] for i in github_tools.list_issues()] == [1]
 
 
 def test_body_is_truncated_to_the_context_budget(fake_gh):
     fake_gh.payload = [raw_issue(body="x" * 5000)]
 
-    assert len(agent.list_issues()[0]["body"]) == 600
+    assert len(github_tools.list_issues()[0]["body"]) == 600
 
 
 def test_null_assignee_and_null_body_do_not_crash(fake_gh):
     fake_gh.payload = [raw_issue(assignee=None, body=None)]
 
-    issue = agent.list_issues()[0]
+    issue = github_tools.list_issues()[0]
 
     assert issue["assignee"] is None
     assert issue["body"] == ""
@@ -90,7 +91,7 @@ def test_null_assignee_and_null_body_do_not_crash(fake_gh):
 def test_filters_are_forwarded_but_empty_ones_are_omitted(fake_gh):
     fake_gh.payload = []
 
-    agent.list_issues(state="all", labels="blocked")
+    github_tools.list_issues(state="all", labels="blocked")
 
     _, params = fake_gh.calls[0]
     assert params["state"] == "all"
@@ -105,13 +106,13 @@ def test_filters_are_forwarded_but_empty_ones_are_omitted(fake_gh):
 def test_days_since_counts_whole_days():
     now = datetime.datetime(2026, 9, 25, 0, 0, tzinfo=UTC)
 
-    assert agent._days_since("2026-08-26T00:00:00Z", now) == 30
+    assert github_tools._days_since("2026-08-26T00:00:00Z", now) == 30
 
 
 def test_days_since_does_not_round_up_a_partial_day():
     now = datetime.datetime(2026, 9, 25, 23, 59, tzinfo=UTC)
 
-    assert agent._days_since("2026-08-26T00:00:00Z", now) == 30
+    assert github_tools._days_since("2026-08-26T00:00:00Z", now) == 30
 
 
 def test_days_since_handles_naive_and_aware_without_mixing(monkeypatch):
@@ -119,15 +120,15 @@ def test_days_since_handles_naive_and_aware_without_mixing(monkeypatch):
     from aware, so a regression here raises rather than silently skewing."""
     monkeypatch.setenv("AGENT_NOW", "2026-11-01")
 
-    assert agent._days_since("2026-08-26T00:00:00Z") == 67
+    assert github_tools._days_since("2026-08-26T00:00:00Z") == 67
 
 
 def test_stale_threshold_is_inclusive(fake_gh, monkeypatch):
     monkeypatch.setenv("AGENT_NOW", "2026-09-25T00:00:00Z")
     fake_gh.payload = [raw_issue(updated_at="2026-08-26T00:00:00Z")]
 
-    assert len(agent.find_stale_issues(days=30)) == 1
-    assert len(agent.find_stale_issues(days=31)) == 0
+    assert len(github_tools.find_stale_issues(days=30)) == 1
+    assert len(github_tools.find_stale_issues(days=31)) == 0
 
 
 def test_stale_issues_are_sorted_most_stale_first(fake_gh, monkeypatch):
@@ -138,7 +139,7 @@ def test_stale_issues_are_sorted_most_stale_first(fake_gh, monkeypatch):
         raw_issue(number=3, updated_at="2026-09-01T00:00:00Z"),   # 61 days
     ]
 
-    result = agent.find_stale_issues(days=30)
+    result = github_tools.find_stale_issues(days=30)
 
     assert [i["number"] for i in result] == [2, 3, 1]
     assert [i["stale_days"] for i in result] == [92, 61, 31]
@@ -148,7 +149,7 @@ def test_stale_days_is_added_without_losing_the_projection(fake_gh, monkeypatch)
     monkeypatch.setenv("AGENT_NOW", "2026-11-01T00:00:00Z")
     fake_gh.payload = [raw_issue()]
 
-    issue = agent.find_stale_issues(days=1)[0]
+    issue = github_tools.find_stale_issues(days=1)[0]
 
     assert issue["stale_days"] == 66
     assert issue["title"] == "Duplicate payouts on webhook retry"
@@ -157,7 +158,7 @@ def test_stale_days_is_added_without_losing_the_projection(fake_gh, monkeypatch)
 def test_clock_defaults_to_real_utc_when_unset(monkeypatch):
     monkeypatch.delenv("AGENT_NOW", raising=False)
 
-    now = agent._now()
+    now = github_tools._now()
 
     assert now.tzinfo is not None
     assert abs((datetime.datetime.now(UTC) - now).total_seconds()) < 5

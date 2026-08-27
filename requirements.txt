@@ -1,3 +1,5 @@
 anthropic>=0.40.0
 requests>=2.31.0
 python-dotenv>=1.0.0
+# mcp 2.0 moved FastMCP out of mcp.server.fastmcp; pin to the 1.x API.
+mcp>=1.2,<2

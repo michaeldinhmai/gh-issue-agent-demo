@@ -8,6 +8,8 @@ $ python agent.py "what's blocked right now and why"
 
 There is no keyword matching, no routing table, and no `if "blocked" in question` anywhere in the code. The program's only job is to describe three tools, execute whatever the model asks for, and hand the results back. The decision about *which* tool to call, with *which* arguments, and *how many times*, belongs entirely to the model.
 
+The same three tools run two ways: through the loop in `agent.py`, or through `mcp_server.py`, where Claude Desktop / Claude Code / ChatGPT supplies the loop instead. The tool code is identical in both.
+
 The repository this agent reads is this repository. The issues in the Issues tab are **synthetic seed data** invented for the demo — a fictional billing-reconciliation service — so anyone can clone this and see the agent produce the same answers.
 
 ---
@@ -51,27 +53,41 @@ Change the question and the plan changes. Asked *"anything gone stale we should 
 ## How the loop works
 
 ```mermaid
-flowchart TD
-    Q["Your question<br/><i>what is blocked right now and why</i>"] --> API
+flowchart TB
+    subgraph mine["Option A — you own the loop (agent.py)"]
+        direction TB
+        A1["messages.create<br/>question + tool schemas"] --> A2{"stop_reason?"}
+        A2 -->|"tool_use"| A3["run_tool"]
+        A3 -.->|"feed result back"| A1
+        A2 -->|"end_turn"| A4["Answer"]
+    end
 
-    API["<b>POST /v1/messages</b><br/>whole conversation so far<br/>+ the 3 tool schemas"]
+    subgraph theirs["Option B — the host owns the loop (mcp_server.py)"]
+        direction TB
+        B1["Claude Desktop · Claude Code · ChatGPT<br/>runs the identical loop internally"] --> B2{"stop_reason?"}
+        B2 -->|"tool_use"| B3["MCP call over stdio"]
+        B3 -.->|"feed result back"| B1
+        B2 -->|"end_turn"| B4["Answer in the chat UI"]
+    end
 
-    API --> STOP{"stop_reason?"}
+    A3 --> T
+    B3 --> T
+    T["<b>github_tools.py</b><br/>list_issues · find_stale_issues · get_issue_comments<br/><i>imports no model SDK, knows nothing about turns</i>"]
+    T --> GH[("GitHub<br/>Issues API")]
 
-    STOP -->|"<b>tool_use</b><br/>model wants data first"| EXEC
-
-    EXEC["Run the matching Python function<br/>list_issues · find_stale_issues · get_issue_comments"]
-    EXEC --> GH[("GitHub<br/>Issues API")]
-    GH --> BACK["Append every tool_result<br/><b>in ONE user message</b>"]
-    BACK --> API
-
-    STOP -->|"<b>end_turn</b><br/>model has enough"| ANS["Final answer"]
-
-    style Q fill:#e8f0fe,stroke:#4285f4,color:#000
-    style ANS fill:#e6f4ea,stroke:#34a853,color:#000
-    style STOP fill:#fef7e0,stroke:#f9ab00,color:#000
+    style T fill:#e8f0fe,stroke:#4285f4,color:#000
     style GH fill:#f1f3f4,stroke:#5f6368,color:#000
+    style A2 fill:#fef7e0,stroke:#f9ab00,color:#000
+    style B2 fill:#fef7e0,stroke:#f9ab00,color:#000
+    style A4 fill:#e6f4ea,stroke:#34a853,color:#000
+    style B4 fill:#e6f4ea,stroke:#34a853,color:#000
 ```
+
+**Read the two boxes side by side: they are the same shape.** Both branch on `stop_reason`, both feed the result back and ask again, both stop on `end_turn`. The dotted edge — result goes back in, model decides again — is what makes either one an agent rather than a single API call.
+
+The only thing that differs is *whose process the loop runs in*. Everything below the fork is shared, byte for byte: one `github_tools.py`, three functions, no model SDK imported anywhere in it. That separation is not tidiness, it is the reason the same tools serve a CLI and Claude Desktop without a rewrite.
+
+What you trade going from A to B: the host takes over the system prompt, the model choice, the turn budget, and the trace. You gain distribution and delete about sixty lines. **MCP buys reach, and costs control** — which is why this repo keeps both rather than replacing one with the other.
 
 **The arrow from `BACK` to `API` is the entire idea.** Everything else is a single API call. That one edge — feed the result back and ask again — is what turns a prompt into an agent. The model sees what its own request returned and decides what to do next.
 
@@ -165,6 +181,49 @@ Each tool call is printed as it happens — `-> tool(args)` for the request, `<-
 
 ---
 
+## Using it from Claude Desktop, Claude Code, or ChatGPT
+
+`mcp_server.py` exposes the same three tools over MCP, so a host application
+supplies the loop instead of this repo. It imports `github_tools` and adds
+nothing else — no `anthropic`, no API key, no message list, no `max_turns`.
+
+Register it with Claude Code:
+
+```bash
+claude mcp add gh-issues -- /full/path/to/.venv/Scripts/python.exe /full/path/to/mcp_server.py
+```
+
+Or add it to `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "gh-issues": {
+      "command": "C:\path\to\gh-issue-agent-demo\.venv\Scripts\python.exe",
+      "args": ["C:\path\to\gh-issue-agent-demo\mcp_server.py"]
+    }
+  }
+}
+```
+
+Then ask Claude *"what's blocked in my backlog and why"* in the chat window
+and watch it call `list_issues`, decide the titles are insufficient, and
+chain into `get_issue_comments` — the same plan `agent.py` produces, with no
+code of yours in the middle.
+
+**The tool descriptions do the same job here.** MCP derives each tool's schema
+and description from the Python signature and docstring, so the wording that
+drives the routing decision is still yours. It is still prompt engineering;
+only the transport changed.
+
+**What you give up.** With `agent.py` you control the system prompt, the model,
+the turn cap, and you can record a trace — which is what makes `evals/`
+possible. Under MCP the host owns all of that. You can still log calls
+server-side, but you are then measuring someone else's harness driving your
+tools. That trade is the point of keeping both files.
+
+---
+
 ## Testing
 
 This project has two halves that fail in completely different ways, so it has two kinds of test.
@@ -217,11 +276,13 @@ Worth noting how the loop behaved while the bug was live: the 422 came back as a
 
 | File | Purpose |
 |---|---|
-| `agent.py` | Tool implementations, tool schemas, and the loop |
+| `github_tools.py` | The three tools and their schemas. No model SDK, no loop |
+| `agent.py` | The tool-use loop this repo owns |
+| `mcp_server.py` | The same tools over MCP, for a host that brings its own loop |
 | `tests/test_tools.py` | Projection, filtering, and staleness arithmetic |
 | `tests/test_loop.py` | The loop's message protocol, against a fake client |
 | `evals/eval_routing.py` | Trace-based checks on the model's tool selection |
-| `requirements.txt` | `anthropic`, `requests`, `python-dotenv` |
+| `requirements.txt` | `anthropic`, `requests`, `python-dotenv`, `mcp` |
 | `requirements-dev.txt` | The above plus `pytest` |
 | `.env.example` | Template for credentials |
 

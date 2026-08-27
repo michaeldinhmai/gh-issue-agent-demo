@@ -14,6 +14,7 @@ import types
 import pytest
 
 import agent
+import github_tools  # noqa: F401
 
 
 # --------------------------------------------------------------------------
@@ -200,3 +201,15 @@ def test_no_all_optional_schema_declares_strict():
         schema = tool["input_schema"]
         all_optional = not schema.get("required")
         assert not (all_optional and tool.get("strict")), tool["name"]
+
+
+def test_mcp_server_exposes_the_same_tools_as_the_loop():
+    """Two hosts consume github_tools: this repo's loop and any MCP client.
+    A tool added to one and forgotten in the other is a silent divergence."""
+    import asyncio
+
+    import mcp_server
+
+    exposed = {t.name for t in asyncio.run(mcp_server.mcp.list_tools())}
+
+    assert exposed == set(agent.TOOL_FUNCTIONS)
