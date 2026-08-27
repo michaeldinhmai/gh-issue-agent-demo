@@ -83,28 +83,28 @@ This is an actual trace, not an illustration. Nothing in the code chose these ca
 sequenceDiagram
     autonumber
     participant You
-    participant Loop as agent.py
+    participant Runner as agent.py
     participant Claude
     participant GH as GitHub
 
-    You->>Loop: what is blocked right now and why
-    Loop->>Claude: question + 3 tool schemas
+    You->>Runner: what is blocked right now and why
+    Runner->>Claude: question + 3 tool schemas
 
     Note over Claude: Picks a filter on its own.<br/>No keyword matching in the code.
-    Claude-->>Loop: tool_use — list_issues(labels="blocked")
-    Loop->>GH: GET /issues?labels=blocked
-    GH-->>Loop: issues 1, 5, 8
-    Loop->>Claude: tool_result — 3 issues
+    Claude-->>Runner: tool_use — list_issues(labels="blocked")
+    Runner->>GH: GET /issues?labels=blocked
+    GH-->>Runner: issues 1, 5, 8
+    Runner->>Claude: tool_result — 3 issues
 
     Note over Claude: Titles say WHAT is blocked.<br/>None of them say WHY.<br/>So: go read the threads.
-    Claude-->>Loop: 3 tool_use blocks at once — comments on 1, 5, 8
-    Loop->>GH: 3 parallel GETs
-    GH-->>Loop: comment threads
-    Loop->>Claude: 3 tool_results, one message
+    Claude-->>Runner: 3 tool_use blocks at once — comments on 1, 5, 8
+    Runner->>GH: 3 parallel GETs
+    GH-->>Runner: comment threads
+    Runner->>Claude: 3 tool_results, one message
 
     Note over Claude: Now it has the reasons.
-    Claude-->>Loop: end_turn + answer
-    Loop-->>You: blocked on vendor VS-4471, on PLAT-882,<br/>and issue 8 is waiting on issue 10
+    Claude-->>Runner: end_turn + answer
+    Runner-->>You: blocked on vendor VS-4471, on PLAT-882,<br/>and issue 8 is waiting on issue 10
 ```
 
 Step 7 is the one worth pointing at in an interview: the model read a list, judged it insufficient, and issued three more calls *in parallel* to fill the gap. That decision lives nowhere in this repository.
