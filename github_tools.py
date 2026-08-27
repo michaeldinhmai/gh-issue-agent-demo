@@ -13,12 +13,16 @@ That separation is the whole architecture.
 
 import datetime
 import os
+import pathlib
 import subprocess
 
 import requests
 from dotenv import load_dotenv
 
-load_dotenv()
+# Anchored to this file, not the process working directory. An MCP host
+# launches mcp_server.py from wherever it likes, and a bare load_dotenv()
+# would silently find nothing.
+load_dotenv(pathlib.Path(__file__).parent / ".env")
 
 
 def _github_token():
