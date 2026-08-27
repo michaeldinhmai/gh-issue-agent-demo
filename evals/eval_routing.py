@@ -20,7 +20,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import agent  # noqa: E402
+from ghagent import loop  # noqa: E402
 
 
 def tools_used(trace):
@@ -72,7 +72,7 @@ def run_once():
     for case in CASES:
         trace = []
         try:
-            agent.ask(case["question"], trace=trace)
+            loop.ask(case["question"], trace=trace)
             passed = bool(case["check"](trace))
             detail = " -> ".join(c["tool"] for c in trace) or "(no tool calls)"
         except Exception as exc:

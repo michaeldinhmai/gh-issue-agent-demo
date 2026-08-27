@@ -1,57 +1,20 @@
-"""GitHub Issues tools, with no knowledge of any model or host.
+"""The three GitHub Issues tools, plus the schemas that describe them.
 
-This module is the reason the same three functions can serve two completely
-different consumers without modification:
+Deliberately one module: a tool's behaviour and the description the model
+routes on must change together. Splitting them invites exactly the drift
+this project already hit once, where a schema said one thing and the
+function did another.
 
-  * agent.py       - a hand-written tool-use loop that this repo owns
-  * mcp_server.py  - an MCP server, where Claude Desktop / Claude Code /
-                     ChatGPT owns the loop instead
-
-Nothing below imports anthropic, and nothing below knows what a "turn" is.
-That separation is the whole architecture.
+Nothing here imports a model SDK. That is what lets both hosts - the loop in
+ghagent/loop.py and the MCP server at the repo root - consume it unchanged.
 """
 
 import datetime
-import os
-import pathlib
-import subprocess
 
 import requests
-from dotenv import load_dotenv
 
-# Anchored to this file, not the process working directory. An MCP host
-# launches mcp_server.py from wherever it likes, and a bare load_dotenv()
-# would silently find nothing.
-load_dotenv(pathlib.Path(__file__).parent / ".env")
+from ghagent.config import GITHUB_API, GITHUB_TOKEN, REPO, utcnow
 
-
-def _github_token():
-    """Prefer GITHUB_TOKEN from .env; otherwise borrow the gh CLI's token.
-
-    The fallback means a developer with `gh` already authenticated never has
-    to copy a PAT into a file on disk.
-    """
-    token = os.environ.get("GITHUB_TOKEN", "").strip()
-    if token and not token.startswith("ghp_..."):
-        return token
-    try:
-        return subprocess.run(
-            ["gh", "auth", "token"], capture_output=True, text=True, check=True
-        ).stdout.strip()
-    except (OSError, subprocess.CalledProcessError):
-        raise SystemExit(
-            "No GitHub credential. Set GITHUB_TOKEN in .env or run `gh auth login`."
-        )
-
-
-GITHUB_API = "https://api.github.com"
-REPO = os.environ.get("GITHUB_REPO", "").strip() or "michaeldinhmai/gh-issue-agent-demo"
-GITHUB_TOKEN = _github_token()
-
-
-# --------------------------------------------------------------------------
-# Tool implementations - plain Python functions hitting the GitHub REST API.
-# --------------------------------------------------------------------------
 
 def _gh(path, params=None):
     """GET a GitHub REST endpoint and return parsed JSON."""
@@ -121,27 +84,10 @@ def list_issues(state="open", labels=None, assignee=None):
     }
 
 
-def _now():
-    """Current UTC time, overridable via AGENT_NOW for tests and demos.
-
-    An injected clock is the only way to test time-dependent logic without
-    sleeping. It doubles as a demo affordance: every seed issue in this repo
-    was created in the same minute, so `AGENT_NOW=2026-11-01` is what makes
-    find_stale_issues return anything interesting.
-    """
-    override = os.environ.get("AGENT_NOW", "").strip()
-    if override:
-        stamp = datetime.datetime.fromisoformat(override)
-        if stamp.tzinfo is None:
-            stamp = stamp.replace(tzinfo=datetime.timezone.utc)
-        return stamp
-    return datetime.datetime.now(datetime.timezone.utc)
-
-
 def _days_since(timestamp, now=None):
     """Whole days between a GitHub ISO-8601 timestamp and now. Pure function."""
     then = datetime.datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
-    return ((now or _now()) - then).days
+    return ((now or utcnow()) - then).days
 
 
 def find_stale_issues(days=30, state="open", labels=None):
@@ -152,7 +98,7 @@ def find_stale_issues(days=30, state="open", labels=None):
     There is no label for "rotting", so this is a question the model cannot
     answer by filtering - only by computing.
     """
-    now = _now()
+    now = utcnow()
     stale = []
     for issue in _issue_rows(state=state, labels=labels):
         age = _days_since(issue["updated_at"], now)

@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gh-issue-agent"
+version = "0.2.0"
+description = "A minimal Claude tool-use loop over the GitHub Issues API"
+requires-python = ">=3.10"
+dependencies = [
+    "anthropic>=0.40.0",
+    "requests>=2.31.0",
+    "python-dotenv>=1.0.0",
+    # mcp 2.0 moved FastMCP out of mcp.server.fastmcp; pin to the 1.x API.
+    "mcp>=1.2,<2",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0.0"]
+web = ["fastapi>=0.110", "uvicorn[standard]>=0.29"]
+
+[project.scripts]
+gh-agent = "ghagent.cli:main"
+
+[tool.setuptools]
+packages = ["ghagent"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
