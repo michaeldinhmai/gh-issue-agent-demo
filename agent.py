@@ -18,6 +18,11 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# Claude writes em-dashes and arrows; the Windows console defaults to cp1252
+# and would mangle them.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 
 def _github_token():
     """Prefer GITHUB_TOKEN from .env; otherwise borrow the gh CLI's token.
@@ -158,7 +163,6 @@ TOOLS = [
             "required": [],
             "additionalProperties": False,
         },
-        "strict": True,
     },
     {
         "name": "get_issue_comments",

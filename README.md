@@ -115,7 +115,11 @@ Each tool call is printed as it happens — `-> tool(args)` for the request, `<-
 
 **Model.** `claude-opus-5`. Thinking is on by default on this model, so the model plans before committing to a call; the thinking blocks come back in `response.content` and are echoed to the API unchanged, which is why the assistant turn is appended whole.
 
-**`strict: True`** on both tool definitions, with `additionalProperties: false`, guarantees the `input` dict validates against the schema — so `TOOL_FUNCTIONS[name](**tool_input)` cannot blow up on an unexpected keyword.
+**`strict: True` on `get_issue_comments` only — and that asymmetry was earned.** Strict schema validation guarantees the `input` dict matches the schema, so `TOOL_FUNCTIONS[name](**tool_input)` can't blow up on an unexpected keyword. It was originally set on both tools. With it on `list_issues` — which has three *optional* parameters and `required: []` — roughly a third of calls came back with a corrupted `assignee` value: the model wanted `list_issues(labels="bug", state="open")`, had no use for `assignee`, and emitted fragments of its own tool-call markup into that string rather than omitting the field. GitHub answered 422.
+
+Strict validation can't catch it, because the garbage *is* a valid string. Dropping strict from `list_issues` — where every parameter is optional and the model needs the freedom to omit fields — eliminated it; `get_issue_comments` has one required parameter and never exhibited the problem, so it keeps strict. The rule of thumb: strict pairs well with required parameters and badly with a bag of optional ones.
+
+Worth noting how the loop behaved while the bug was live: the 422 came back as a `tool_result` with `is_error: True`, the model read the failure, retried with different arguments, and still produced a correct answer. The run was slower and cost more, but it did not fail. That's the practical argument for returning tool errors as results instead of raising.
 
 **Read-only by design.** Neither tool writes. An agent that can close issues is a different risk conversation, and not one this demo needs to have.
 
