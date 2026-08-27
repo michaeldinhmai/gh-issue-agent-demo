@@ -6,7 +6,7 @@ A small agentic loop: you ask a question in English about a GitHub backlog, and 
 $ python agent.py "what's blocked right now and why"
 ```
 
-There is no keyword matching, no routing table, and no `if "blocked" in question` anywhere in the code. The program's only job is to describe two tools, execute whatever the model asks for, and hand the results back. The decision about *which* tool to call, with *which* arguments, and *how many times*, belongs entirely to the model.
+There is no keyword matching, no routing table, and no `if "blocked" in question` anywhere in the code. The program's only job is to describe three tools, execute whatever the model asks for, and hand the results back. The decision about *which* tool to call, with *which* arguments, and *how many times*, belongs entirely to the model.
 
 The repository this agent reads is this repository. The issues in the Issues tab are **synthetic seed data** invented for the demo — a fictional billing-reconciliation service — so anyone can clone this and see the agent produce the same answers.
 
@@ -18,27 +18,33 @@ Most "AI-powered" tooling is a single prompt with a single response. An agent is
 
 ---
 
-## The two tools
+## The three tools
 
 | Tool | Backed by | Returns |
 |---|---|---|
 | `list_issues(state, labels, assignee)` | `GET /repos/{owner}/{repo}/issues` | Number, title, state, labels, assignee, comment count, timestamps, truncated body |
+| `find_stale_issues(days, state, labels)` | the same endpoint, plus arithmetic | The same projection, filtered to issues untouched for `days` days, each carrying a computed `stale_days` |
 | `get_issue_comments(issue_number)` | `GET /repos/{owner}/{repo}/issues/{n}/comments` | Author, timestamp, and body for each comment |
 
-Both are ordinary Python functions calling the GitHub REST API with `requests`. Neither knows anything about Claude.
+All three are ordinary Python functions calling the GitHub REST API with `requests`. None of them knows anything about Claude.
+
+`find_stale_issues` is deliberately not a new endpoint — it calls `list_issues` and does the date math locally. It exists because *"what has gone stale"* has no label behind it. Filtering cannot answer it; only computing can. That makes it the tool that most clearly separates an agent from a search box.
+
+**A note on the clock.** `_now()` reads an optional `AGENT_NOW` environment variable and otherwise returns real UTC. Injecting the clock is what makes the date math testable without sleeping — and it is also a demo affordance, because every seed issue in this repo was created within the same minute, so against the real clock they all have identical ages. Run with `AGENT_NOW=2026-11-01` to see staleness ranking do something interesting.
 
 ---
 
 ## How the agent decides which tool to call
 
-The model never sees the Python. It sees the JSON schemas in `TOOLS` — a name, a description, and a typed parameter list per tool. Those descriptions are the entire basis for its routing decision, which makes them prompt engineering rather than documentation. Two choices in this project do most of the work:
+The model never sees the Python. It sees the JSON schemas in `TOOLS` — a name, a description, and a typed parameter list per tool. Those descriptions are the entire basis for its routing decision, which makes them prompt engineering rather than documentation. Three choices in this project do most of the work:
 
 - `list_issues` is described as the broad first step, and its return value is documented as including a **comment count**. That gives the model a cheap signal for deciding whether a thread is worth fetching.
 - `get_issue_comments` is described as the tool for finding out *why* — and explicitly as costing one API call per issue. That discourages fetching all twelve threads when three will do.
+- `find_stale_issues` states outright that no staleness label exists, so the model knows filtering cannot substitute for it.
 
 The seed data is arranged to make the decision visible. Issue #1 is labeled `blocked`, but its body never says what is blocking it — the answer ("vendor ticket VS-4471") lives only in the comments. So a question like *"what's blocked right now and why"* cannot be answered from `list_issues` alone. Watching the trace, you see the model call `list_issues(labels="blocked")`, get three issues back, and then decide on its own to call `get_issue_comments` on each of them. Nothing in the code told it to do that.
 
-Ask a question that *is* answerable from the list — *"what has nobody picked up yet"* — and it makes one call and stops. Same code, different plan.
+Change the question and the plan changes. Asked *"anything gone stale we should re-check before the v2 shutoff?"*, it opens with `find_stale_issues`, then pulls the threads on the issues that matter — and notices that the Oct 15 escalation deadline written in #5's comments has already passed relative to the staleness it just computed. Two tools and a date comparison, assembled by the model, not by the code.
 
 ---
 
@@ -103,9 +109,44 @@ GITHUB_REPO=michaeldinhmai/gh-issue-agent-demo
 python agent.py "what's blocked right now and why"
 python agent.py "summarize the open bugs"
 python agent.py "what has nobody picked up yet"
+
+# staleness needs a future clock - see the note above
+AGENT_NOW=2026-11-01 python agent.py "what has gone stale and nobody is chasing?"
 ```
 
 Each tool call is printed as it happens — `-> tool(args)` for the request, `<- result` for the response — so the plan is visible rather than inferred. Set `AGENT_VERBOSE=0` to silence the trace and print only the answer.
+
+---
+
+## Testing
+
+This project has two halves that fail in completely different ways, so it has two kinds of test.
+
+```bash
+pip install -r requirements-dev.txt
+pytest                      # 24 tests, no network, no API key, no tokens
+python evals/eval_routing.py --runs 3   # spends tokens, needs a live repo
+```
+
+**`tests/` — the deterministic half.** Everything except the model's judgement is ordinary code and tests like ordinary code. `tests/test_tools.py` covers the projection (does it drop pull requests, truncate the body, survive a null assignee), the filter forwarding, and the staleness arithmetic — inclusive threshold, no rounding up a partial day, no naive/aware datetime mixing. `tests/test_loop.py` is the more valuable file, because the loop's contract with the API is the thing that breaks silently:
+
+- all `tool_result` blocks from one assistant turn land in a **single** user message
+- every `tool_use_id` matches the call it answers
+- the assistant turn is appended **whole**, thinking blocks included
+- a raising tool becomes an error result, not a crash
+- `max_turns` actually caps the loop
+
+Break any of those and the API still returns 200. The model just quietly gets worse — no exception, no failing request, nothing in the logs. That is exactly the failure mode worth a test.
+
+Those tests were checked against deliberate mutations rather than assumed to work: dropping non-text blocks from the assistant turn, splitting tool results across separate user messages, and re-adding `strict: True` to an all-optional schema each produce a failure. The last one is a rule rather than an instance — `test_no_all_optional_schema_declares_strict` walks every tool definition, so a fourth tool added later inherits the guard.
+
+**`evals/` — the non-deterministic half.** Whether the model picks the right tool is not unit-testable. It is a probabilistic decision, and the thing most likely to break it is a *reworded tool description* — a change no unit test would notice, because no code changed.
+
+So the evals assert on the **trace**, never on the prose: given *"what's blocked right now and why"*, did `get_issue_comments` appear at all? (If not, the model answered a "why" question without reading any discussion, which means it invented the reason.) Given a staleness question, did it route to `find_stale_issues`? Did any call come back malformed? Prose assertions would fail on rewrites that are equally correct; trace assertions catch real regressions.
+
+Run them with `--runs N` and read the pass rate, not a single result. One failure on a stochastic system is a prompt to investigate, not proof of a regression.
+
+**What neither would have caught.** The `strict: True` bug that actually shipped here produced malformed tool *arguments* — valid JSON, valid against the schema, semantic garbage. No unit test would have seen it, because no Python behaved incorrectly. Only running the thing against a real API surfaced it. That is the honest limitation: for an agent, integration and behavioural runs are not the optional extra layer on top of unit tests, they are where a whole category of bug lives.
 
 ---
 
@@ -130,6 +171,10 @@ Worth noting how the loop behaved while the bug was live: the 422 came back as a
 | File | Purpose |
 |---|---|
 | `agent.py` | Tool implementations, tool schemas, and the loop |
+| `tests/test_tools.py` | Projection, filtering, and staleness arithmetic |
+| `tests/test_loop.py` | The loop's message protocol, against a fake client |
+| `evals/eval_routing.py` | Trace-based checks on the model's tool selection |
 | `requirements.txt` | `anthropic`, `requests`, `python-dotenv` |
+| `requirements-dev.txt` | The above plus `pytest` |
 | `.env.example` | Template for credentials |
 

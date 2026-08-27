@@ -7,6 +7,7 @@ describes them, and lets the model plan the calls. Run with:
     python agent.py "what's blocked right now and why"
 """
 
+import datetime
 import json
 import os
 import subprocess
@@ -106,6 +107,46 @@ def list_issues(state="open", labels=None, assignee=None):
     ]
 
 
+def _now():
+    """Current UTC time, overridable via AGENT_NOW for tests and demos.
+
+    An injected clock is the only way to test time-dependent logic without
+    sleeping. It doubles as a demo affordance: every seed issue in this repo
+    was created in the same minute, so `AGENT_NOW=2026-11-01` is what makes
+    find_stale_issues return anything interesting.
+    """
+    override = os.environ.get("AGENT_NOW", "").strip()
+    if override:
+        stamp = datetime.datetime.fromisoformat(override)
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=datetime.timezone.utc)
+        return stamp
+    return datetime.datetime.now(datetime.timezone.utc)
+
+
+def _days_since(timestamp, now=None):
+    """Whole days between a GitHub ISO-8601 timestamp and now. Pure function."""
+    then = datetime.datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    return ((now or _now()) - then).days
+
+
+def find_stale_issues(days=30, state="open", labels=None):
+    """Issues untouched for at least `days` days, newest-stale first.
+
+    Deliberately built on top of list_issues rather than a new endpoint: one
+    API call, and the staleness math is ours, not GitHub's. There is no label
+    for "rotting", so this is a question the model cannot answer by
+    filtering - only by computing.
+    """
+    now = _now()
+    stale = []
+    for issue in list_issues(state=state, labels=labels):
+        age = _days_since(issue["updated_at"], now)
+        if age >= int(days):
+            stale.append({**issue, "stale_days": age})
+    return sorted(stale, key=lambda issue: issue["stale_days"], reverse=True)
+
+
 def get_issue_comments(issue_number):
     """Return the comment thread on one issue, author and body only."""
     comments = _gh(f"/repos/{REPO}/issues/{int(issue_number)}/comments",
@@ -165,6 +206,38 @@ TOOLS = [
         },
     },
     {
+        "name": "find_stale_issues",
+        "description": (
+            "Find issues that have not been updated in at least N days, "
+            "sorted most-stale first. Each result carries a stale_days field. "
+            "There is no label for staleness, so this is the only way to "
+            "answer questions about neglect, rot, or things that have gone "
+            "quiet. Combine it with the labels argument to ask sharper "
+            "questions - for example stale blocked issues, where the blocker "
+            "itself may no longer be current."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "days": {
+                    "type": "integer",
+                    "description": "Minimum days since last update. Defaults to 30.",
+                },
+                "state": {
+                    "type": "string",
+                    "enum": ["open", "closed", "all"],
+                    "description": "Issue state filter. Defaults to open.",
+                },
+                "labels": {
+                    "type": "string",
+                    "description": "Optional comma-separated label filter.",
+                },
+            },
+            "required": ["days"],
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "get_issue_comments",
         "description": (
             "Fetch the full comment thread on a single issue by number. Use "
@@ -190,6 +263,7 @@ TOOLS = [
 
 TOOL_FUNCTIONS = {
     "list_issues": list_issues,
+    "find_stale_issues": find_stale_issues,
     "get_issue_comments": get_issue_comments,
 }
 
@@ -214,9 +288,15 @@ def run_tool(name, tool_input):
         return f"{type(exc).__name__}: {exc}", True
 
 
-def ask(question, max_turns=10):
-    """Run the agentic loop until the model stops requesting tools."""
-    client = anthropic.Anthropic()
+def ask(question, max_turns=10, client=None, trace=None):
+    """Run the agentic loop until the model stops requesting tools.
+
+    `client` is injectable so the loop's message-protocol behaviour can be
+    tested against a fake without spending tokens. Pass a list as `trace` to
+    record every tool call the model made - that record, not the prose, is
+    what the evals assert on.
+    """
+    client = client or anthropic.Anthropic()
     messages = [{"role": "user", "content": question}]
 
     for turn in range(max_turns):
@@ -248,6 +328,9 @@ def ask(question, max_turns=10):
             if VERBOSE:
                 print(f"[turn {turn + 1}] -> {block.name}({json.dumps(block.input)})")
             content, is_error = run_tool(block.name, block.input)
+            if trace is not None:
+                trace.append({"turn": turn + 1, "tool": block.name,
+                              "input": block.input, "is_error": is_error})
             if VERBOSE:
                 preview = content if len(content) < 160 else content[:160] + "..."
                 print(f"[turn {turn + 1}] <- {'ERROR ' if is_error else ''}{preview}")
