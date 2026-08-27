@@ -268,6 +268,10 @@ Strict validation can't catch it, because the garbage *is* a valid string. Dropp
 
 Worth noting how the loop behaved while the bug was live: the 422 came back as a `tool_result` with `is_error: True`, the model read the failure, retried with different arguments, and still produced a correct answer. The run was slower and cost more, but it did not fail. That's the practical argument for returning tool errors as results instead of raising.
 
+**Every tool returns an envelope, never a bare list.** `get_issue_comments` returns `{"issue_number": 10, "comment_count": 0, "comments": []}` rather than `[]`. The reason is specific to the consumer being a model: a bare empty list cannot distinguish *"this issue has no discussion"* from *"the call failed and returned nothing."* One is a fact worth reporting; the other warrants a retry. Restating the query alongside a count makes absence explicit and quotable, so the model stops guessing.
+
+This surfaced by running the tools through MCP, where an empty thread rendered as `completed with no output` — indistinguishable from a broken tool. `find_stale_issues` carries the same idea further with an `as_of` field: without it, `stale_days: 0` could mean an active repo *or* a wrong clock, and the model has no way to tell which. Designing the *shape* of a tool result for a model reader is a distinct skill from designing a REST response for a program.
+
 **Read-only by design.** Neither tool writes. An agent that can close issues is a different risk conversation, and not one this demo needs to have.
 
 ---

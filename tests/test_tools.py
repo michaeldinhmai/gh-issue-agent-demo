@@ -53,7 +53,7 @@ def fake_gh(monkeypatch):
 def test_projection_keeps_only_the_documented_fields(fake_gh):
     fake_gh.payload = [raw_issue()]
 
-    issue = github_tools.list_issues()[0]
+    issue = github_tools.list_issues()["issues"][0]
 
     assert set(issue) == {
         "number", "title", "state", "labels", "assignee",
@@ -70,19 +70,19 @@ def test_pull_requests_are_dropped(fake_gh):
         raw_issue(number=2, pull_request={"url": "https://api.github.com/..."}),
     ]
 
-    assert [i["number"] for i in github_tools.list_issues()] == [1]
+    assert [i["number"] for i in github_tools.list_issues()["issues"]] == [1]
 
 
 def test_body_is_truncated_to_the_context_budget(fake_gh):
     fake_gh.payload = [raw_issue(body="x" * 5000)]
 
-    assert len(github_tools.list_issues()[0]["body"]) == 600
+    assert len(github_tools.list_issues()["issues"][0]["body"]) == 600
 
 
 def test_null_assignee_and_null_body_do_not_crash(fake_gh):
     fake_gh.payload = [raw_issue(assignee=None, body=None)]
 
-    issue = github_tools.list_issues()[0]
+    issue = github_tools.list_issues()["issues"][0]
 
     assert issue["assignee"] is None
     assert issue["body"] == ""
@@ -127,8 +127,8 @@ def test_stale_threshold_is_inclusive(fake_gh, monkeypatch):
     monkeypatch.setenv("AGENT_NOW", "2026-09-25T00:00:00Z")
     fake_gh.payload = [raw_issue(updated_at="2026-08-26T00:00:00Z")]
 
-    assert len(github_tools.find_stale_issues(days=30)) == 1
-    assert len(github_tools.find_stale_issues(days=31)) == 0
+    assert github_tools.find_stale_issues(days=30)["count"] == 1
+    assert github_tools.find_stale_issues(days=31)["count"] == 0
 
 
 def test_stale_issues_are_sorted_most_stale_first(fake_gh, monkeypatch):
@@ -139,7 +139,7 @@ def test_stale_issues_are_sorted_most_stale_first(fake_gh, monkeypatch):
         raw_issue(number=3, updated_at="2026-09-01T00:00:00Z"),   # 61 days
     ]
 
-    result = github_tools.find_stale_issues(days=30)
+    result = github_tools.find_stale_issues(days=30)["issues"]
 
     assert [i["number"] for i in result] == [2, 3, 1]
     assert [i["stale_days"] for i in result] == [92, 61, 31]
@@ -149,7 +149,7 @@ def test_stale_days_is_added_without_losing_the_projection(fake_gh, monkeypatch)
     monkeypatch.setenv("AGENT_NOW", "2026-11-01T00:00:00Z")
     fake_gh.payload = [raw_issue()]
 
-    issue = github_tools.find_stale_issues(days=1)[0]
+    issue = github_tools.find_stale_issues(days=1)["issues"][0]
 
     assert issue["stale_days"] == 66
     assert issue["title"] == "Duplicate payouts on webhook retry"
@@ -193,4 +193,38 @@ def test_successful_tool_result_is_json(fake_gh):
     content, is_error = agent.run_tool("list_issues", {"state": "open"})
 
     assert is_error is False
-    assert content.startswith("[{")
+    assert content.startswith("{")
+
+
+# --------------------------------------------------------------------------
+# Envelopes - a bare [] cannot tell a model "nothing matched" apart from
+# "the call failed", so every tool states what it looked for and how many it
+# found.
+# --------------------------------------------------------------------------
+
+def test_empty_comment_thread_states_itself(fake_gh):
+    fake_gh.payload = []
+
+    result = github_tools.get_issue_comments(10)
+
+    assert result == {"issue_number": 10, "comment_count": 0, "comments": []}
+
+
+def test_no_matching_issues_echoes_the_filters_back(fake_gh):
+    fake_gh.payload = []
+
+    result = github_tools.list_issues(labels="nonexistent")
+
+    assert result["count"] == 0
+    assert result["filters"]["labels"] == "nonexistent"
+
+
+def test_stale_result_states_the_clock_it_used(fake_gh, monkeypatch):
+    """Without as_of, '0 days stale' is indistinguishable from a wrong clock."""
+    monkeypatch.setenv("AGENT_NOW", "2026-11-01T00:00:00Z")
+    fake_gh.payload = [raw_issue()]
+
+    result = github_tools.find_stale_issues(days=1)
+
+    assert result["as_of"].startswith("2026-11-01")
+    assert result["threshold_days"] == 1

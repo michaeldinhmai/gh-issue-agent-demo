@@ -21,12 +21,14 @@ mcp = FastMCP("gh-issue-agent")
 
 
 @mcp.tool()
-def list_issues(state: str = "open", labels: str = "", assignee: str = "") -> list:
+def list_issues(state: str = "open", labels: str = "", assignee: str = "") -> dict:
     """List issues in the repository, optionally filtered by state, label, or
-    assignee. Returns issue number, title, state, labels, assignee, comment
-    count, timestamps, and a truncated body. Use this first to find candidate
-    issues. The comment count tells you whether an issue has discussion worth
-    fetching.
+    assignee. Returns a count and the filters that were applied, then the
+    issues themselves: number, title, state, labels, assignee, comment count,
+    timestamps, and a truncated body. A count of 0 means nothing matched - not
+    that the call failed, so do not retry it unchanged. Use this first to find
+    candidate issues. The comment count tells you whether an issue has
+    discussion worth fetching.
 
     Args:
         state: One of open, closed, all. Defaults to open.
@@ -42,9 +44,11 @@ def list_issues(state: str = "open", labels: str = "", assignee: str = "") -> li
 
 
 @mcp.tool()
-def find_stale_issues(days: int = 30, state: str = "open", labels: str = "") -> list:
+def find_stale_issues(days: int = 30, state: str = "open", labels: str = "") -> dict:
     """Find issues not updated in at least N days, most stale first. Each
-    result carries a stale_days field. There is no label for staleness, so
+    result carries a stale_days field, and the response states the as_of date
+    the ages were computed against - trust that date over any assumption about
+    what today is. There is no label for staleness, so
     this is the only way to answer questions about neglect, rot, or things
     that have gone quiet. Combine it with labels to ask sharper questions -
     for example stale blocked issues, where the blocker itself may no longer
@@ -61,9 +65,11 @@ def find_stale_issues(days: int = 30, state: str = "open", labels: str = "") -> 
 
 
 @mcp.tool()
-def get_issue_comments(issue_number: int) -> list:
-    """Fetch the full comment thread on a single issue by number. Use this
-    when the issue title and truncated body do not explain the situation -
+def get_issue_comments(issue_number: int) -> dict:
+    """Fetch the full comment thread on a single issue by number. Returns a
+    comment_count alongside the comments, so an empty thread is stated rather
+    than implied. Use this when the issue title and truncated body do not
+    explain the situation -
     for example to find out WHY something is blocked, or what the latest
     status is. Costs one API call per issue, so call it only on issues that
     matter to the question.

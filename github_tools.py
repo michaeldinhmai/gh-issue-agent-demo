@@ -69,13 +69,9 @@ def _gh(path, params=None):
     return response.json()
 
 
-def list_issues(state="open", labels=None, assignee=None):
-    """Return a compact projection of repo issues.
-
-    GitHub returns ~80 fields per issue. Everything the model does not need is
-    dropped here: the tool result is context the model pays for on every
-    subsequent turn of the loop.
-    """
+def _issue_rows(state="open", labels=None, assignee=None):
+    """The projection itself, as a plain list. Internal - callers get an
+    envelope, so that a zero-length result still says what it looked for."""
     params = {"state": state, "per_page": 100}
     if labels:
         params["labels"] = labels
@@ -104,6 +100,27 @@ def list_issues(state="open", labels=None, assignee=None):
     ]
 
 
+# Every tool returns an envelope rather than a bare list. A bare [] is
+# ambiguous to a model: it cannot tell "nothing matched" from "the call
+# failed and returned nothing". Restating the filters alongside a count makes
+# absence an explicit, quotable fact - and stops the model from silently
+# retrying a query that already answered correctly.
+
+def list_issues(state="open", labels=None, assignee=None):
+    """Return a compact projection of repo issues.
+
+    GitHub returns ~80 fields per issue. Everything the model does not need is
+    dropped here: the tool result is context the model pays for on every
+    subsequent turn of the loop.
+    """
+    rows = _issue_rows(state=state, labels=labels, assignee=assignee)
+    return {
+        "filters": {"state": state, "labels": labels, "assignee": assignee},
+        "count": len(rows),
+        "issues": rows,
+    }
+
+
 def _now():
     """Current UTC time, overridable via AGENT_NOW for tests and demos.
 
@@ -130,25 +147,35 @@ def _days_since(timestamp, now=None):
 def find_stale_issues(days=30, state="open", labels=None):
     """Issues untouched for at least `days` days, newest-stale first.
 
-    Deliberately built on top of list_issues rather than a new endpoint: one
-    API call, and the staleness math is ours, not GitHub's. There is no label
-    for "rotting", so this is a question the model cannot answer by
-    filtering - only by computing.
+    Deliberately built on top of the same projection rather than a new
+    endpoint: one API call, and the staleness math is ours, not GitHub's.
+    There is no label for "rotting", so this is a question the model cannot
+    answer by filtering - only by computing.
     """
     now = _now()
     stale = []
-    for issue in list_issues(state=state, labels=labels):
+    for issue in _issue_rows(state=state, labels=labels):
         age = _days_since(issue["updated_at"], now)
         if age >= int(days):
             stale.append({**issue, "stale_days": age})
-    return sorted(stale, key=lambda issue: issue["stale_days"], reverse=True)
+    stale.sort(key=lambda issue: issue["stale_days"], reverse=True)
+
+    return {
+        # State the clock. Otherwise the model has no way to know whether
+        # "0 days stale" means the repo is active or the clock is wrong.
+        "as_of": now.isoformat(),
+        "threshold_days": int(days),
+        "filters": {"state": state, "labels": labels},
+        "count": len(stale),
+        "issues": stale,
+    }
 
 
 def get_issue_comments(issue_number):
     """Return the comment thread on one issue, author and body only."""
     comments = _gh(f"/repos/{REPO}/issues/{int(issue_number)}/comments",
                    {"per_page": 100})
-    return [
+    rows = [
         {
             "author": comment["user"]["login"],
             "created_at": comment["created_at"],
@@ -156,6 +183,11 @@ def get_issue_comments(issue_number):
         }
         for comment in comments
     ]
+    return {
+        "issue_number": int(issue_number),
+        "comment_count": len(rows),
+        "comments": rows,
+    }
 
 
 # --------------------------------------------------------------------------
@@ -169,10 +201,13 @@ TOOLS = [
         "name": "list_issues",
         "description": (
             "List issues in the repository, optionally filtered by state, "
-            "label, or assignee. Returns issue number, title, state, labels, "
-            "assignee, comment count, timestamps, and a truncated body. "
-            "Use this first to find candidate issues. The comment count tells "
-            "you whether an issue has discussion worth fetching."
+            "label, or assignee. Returns a count and the filters that were "
+            "applied, then the issues themselves: number, title, state, "
+            "labels, assignee, comment count, timestamps, and a truncated "
+            "body. A count of 0 means nothing matched - not that the call "
+            "failed, so do not retry it unchanged. Use this first to find "
+            "candidate issues. The comment count tells you whether an issue "
+            "has discussion worth fetching."
         ),
         "input_schema": {
             "type": "object",
@@ -206,7 +241,9 @@ TOOLS = [
         "name": "find_stale_issues",
         "description": (
             "Find issues that have not been updated in at least N days, "
-            "sorted most-stale first. Each result carries a stale_days field. "
+            "sorted most-stale first. Each result carries a stale_days field, "
+            "and the response states the as_of date the ages were computed "
+            "against - trust that date over any assumption about today. "
             "There is no label for staleness, so this is the only way to "
             "answer questions about neglect, rot, or things that have gone "
             "quiet. Combine it with the labels argument to ask sharper "
@@ -237,7 +274,9 @@ TOOLS = [
     {
         "name": "get_issue_comments",
         "description": (
-            "Fetch the full comment thread on a single issue by number. Use "
+            "Fetch the full comment thread on a single issue by number. Returns "
+            "a comment_count alongside the comments, so an empty thread is "
+            "stated rather than implied. Use "
             "this when the issue title and truncated body do not explain the "
             "situation - for example to find out WHY something is blocked, or "
             "what the latest status is. Costs one API call per issue, so call "
