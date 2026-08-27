@@ -3,12 +3,12 @@
 A small agentic loop: you ask a question in English about a GitHub backlog, and Claude decides which GitHub Issues API calls to make to answer it.
 
 ```
-$ python agent.py "what's blocked right now and why"
+$ gh-agent "what's blocked right now and why"
 ```
 
 There is no keyword matching, no routing table, and no `if "blocked" in question` anywhere in the code. The program's only job is to describe three tools, execute whatever the model asks for, and hand the results back. The decision about *which* tool to call, with *which* arguments, and *how many times*, belongs entirely to the model.
 
-The same three tools run two ways: through the loop in `agent.py`, or through `mcp_server.py`, where Claude Desktop / Claude Code / ChatGPT supplies the loop instead. The tool code is identical in both.
+The same three tools run two ways: through the loop in `ghagent/loop.py`, or through `mcp_server.py`, where Claude Desktop / Claude Code / ChatGPT supplies the loop instead. The tool code is identical in both.
 
 The repository this agent reads is this repository. The issues in the Issues tab are **synthetic seed data** invented for the demo — a fictional billing-reconciliation service — so anyone can clone this and see the agent produce the same answers.
 
@@ -54,7 +54,7 @@ Change the question and the plan changes. Asked *"anything gone stale we should 
 
 ```mermaid
 flowchart TB
-    subgraph mine["Option A — you own the loop (agent.py)"]
+    subgraph mine["Option A — you own the loop (ghagent/loop.py)"]
         direction TB
         A1["messages.create<br/>question + tool schemas"] --> A2{"stop_reason?"}
         A2 -->|"tool_use"| A3["run_tool"]
@@ -72,7 +72,7 @@ flowchart TB
 
     A3 --> T
     B3 --> T
-    T["<b>github_tools.py</b><br/>list_issues · find_stale_issues · get_issue_comments<br/><i>imports no model SDK, knows nothing about turns</i>"]
+    T["<b>ghagent/tools.py</b><br/>list_issues · find_stale_issues · get_issue_comments<br/><i>imports no model SDK, knows nothing about turns</i>"]
     T --> GH[("GitHub<br/>Issues API")]
 
     style T fill:#e8f0fe,stroke:#4285f4,color:#000
@@ -85,7 +85,7 @@ flowchart TB
 
 **Read the two boxes side by side: they are the same shape.** Both branch on `stop_reason`, both feed the result back and ask again, both stop on `end_turn`. The dotted edge — result goes back in, model decides again — is what makes either one an agent rather than a single API call.
 
-The only thing that differs is *whose process the loop runs in*. Everything below the fork is shared, byte for byte: one `github_tools.py`, three functions, no model SDK imported anywhere in it. That separation is not tidiness, it is the reason the same tools serve a CLI and Claude Desktop without a rewrite.
+The only thing that differs is *whose process the loop runs in*. Everything below the fork is shared, byte for byte: one `ghagent/tools.py`, three functions, no model SDK imported anywhere in it. That separation is not tidiness, it is the reason the same tools serve a CLI and Claude Desktop without a rewrite.
 
 What you trade going from A to B: the host takes over the system prompt, the model choice, the turn budget, and the trace. You gain distribution and delete about sixty lines. **MCP buys reach, and costs control** — which is why this repo keeps both rather than replacing one with the other.
 
@@ -97,7 +97,7 @@ This is an actual trace, not an illustration. Nothing in the code chose these ca
 sequenceDiagram
     autonumber
     participant You
-    participant Runner as agent.py
+    participant Runner as ghagent
     participant Claude
     participant GH as GitHub
 
@@ -150,7 +150,7 @@ git clone https://github.com/michaeldinhmai/gh-issue-agent-demo.git
 cd gh-issue-agent-demo
 python -m venv .venv
 .venv/Scripts/activate      # macOS/Linux: source .venv/bin/activate
-pip install -r requirements.txt
+pip install -e ".[dev,web]"
 cp .env.example .env
 ```
 
@@ -167,12 +167,12 @@ GITHUB_REPO=michaeldinhmai/gh-issue-agent-demo
 ## Running it
 
 ```bash
-python agent.py "what's blocked right now and why"
-python agent.py "summarize the open bugs"
-python agent.py "what has nobody picked up yet"
+gh-agent "what's blocked right now and why"
+gh-agent "summarize the open bugs"
+gh-agent "what has nobody picked up yet"
 
 # staleness needs a future clock - see the note above
-AGENT_NOW=2026-11-01 python agent.py "what has gone stale and nobody is chasing?"
+AGENT_NOW=2026-11-01 gh-agent "what has gone stale and nobody is chasing?"
 ```
 
 Each tool call is printed as it happens — `-> tool(args)` for the request, `<- result` for the response — so the plan is visible rather than inferred. Set `AGENT_VERBOSE=0` to silence the trace and print only the answer.
@@ -206,7 +206,7 @@ Or add it to `claude_desktop_config.json`:
 
 Then ask Claude *"what's blocked in my backlog and why"* in the chat window
 and watch it call `list_issues`, decide the titles are insufficient, and
-chain into `get_issue_comments` — the same plan `agent.py` produces, with no
+chain into `get_issue_comments` — the same plan the CLI produces, with no
 code of yours in the middle.
 
 **The tool descriptions do the same job here.** MCP derives each tool's schema
@@ -214,11 +214,32 @@ and description from the Python signature and docstring, so the wording that
 drives the routing decision is still yours. It is still prompt engineering;
 only the transport changed.
 
-**What you give up.** With `agent.py` you control the system prompt, the model,
+**What you give up.** With your own loop you control the system prompt, the model,
 the turn cap, and you can record a trace — which is what makes `evals/`
 possible. Under MCP the host owns all of that. You can still log calls
 server-side, but you are then measuring someone else's harness driving your
 tools. That trade is the point of keeping both files.
+
+---
+
+## The web UI
+
+```bash
+pip install -e ".[web]"
+uvicorn web.app:app --port 8000
+```
+
+Then open <http://localhost:8000>.
+
+**The trace is the product, not the answer.** A chat box that returns a paragraph looks like every other LLM demo and proves nothing about what is underneath. This page shows each tool call the moment the model issues it — name, arguments, and the result envelope — so the plan assembles itself in front of you. On a typical run the first call lands about two seconds in, the parallel comment fetches arrive around eight, and the answer follows at roughly twenty. Watching the gap between "it fetched a list" and "it decided that list was not enough" is the entire pitch.
+
+It is deliberately small: one FastAPI file, one HTML file, no build step, no framework, no CDN.
+
+**It contains no agent logic.** `ghagent.loop.run()` is a generator that yields one event per step, so the server's whole job is to forward those events as Server-Sent Events, and the browser's whole job is to render them. The CLI consumes exactly the same generator and prints instead. Adding the UI required no change to the loop at all — which is the payoff of having refactored the loop to yield rather than print.
+
+One detail worth knowing: `run()` is synchronous and blocks on the Anthropic API, so the server steps it in a worker thread via `run_in_executor`. Doing it inline would stall the asyncio event loop, the whole response would flush at the end, and the page would show nothing until it showed everything — defeating the point.
+
+The browser renders the small subset of markdown Claude actually emits (bold, italic, inline code, lists) with HTML escaped *before* any tag is inserted, so issue text cannot inject markup into the page.
 
 ---
 
@@ -227,7 +248,7 @@ tools. That trade is the point of keeping both files.
 This project has two halves that fail in completely different ways, so it has two kinds of test.
 
 ```bash
-pip install -r requirements-dev.txt
+pip install -e ".[dev]"
 pytest                      # 24 tests, no network, no API key, no tokens
 python evals/eval_routing.py --runs 3   # spends tokens, needs a live repo
 ```
@@ -278,13 +299,16 @@ This surfaced by running the tools through MCP, where an empty thread rendered a
 
 | File | Purpose |
 |---|---|
-| `github_tools.py` | The three tools and their schemas. No model SDK, no loop |
-| `agent.py` | The tool-use loop this repo owns |
+| `ghagent/tools.py` | The three tools and their schemas. No model SDK, no loop |
+| `ghagent/loop.py` | The tool-use loop, as a generator yielding one event per step |
+| `ghagent/config.py` | Credentials, target repo, and the injectable clock |
+| `ghagent/cli.py` | Terminal entry point — renders loop events as they arrive |
 | `mcp_server.py` | The same tools over MCP, for a host that brings its own loop |
+| `web/app.py` | FastAPI server streaming those same events over SSE |
+| `web/static/index.html` | The single-page UI. No build step, no dependencies |
 | `tests/test_tools.py` | Projection, filtering, and staleness arithmetic |
 | `tests/test_loop.py` | The loop's message protocol, against a fake client |
 | `evals/eval_routing.py` | Trace-based checks on the model's tool selection |
-| `requirements.txt` | `anthropic`, `requests`, `python-dotenv`, `mcp` |
-| `requirements-dev.txt` | The above plus `pytest` |
+| `pyproject.toml` | Dependencies, the `gh-agent` script, and pytest config |
 | `.env.example` | Template for credentials |
 

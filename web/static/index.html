@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>gh-issue-agent</title>
+<style>
+  :root {
+    --bg: #fbfbfa; --panel: #fff; --ink: #1a1a19; --muted: #6b6b68;
+    --line: #e4e4e1; --accent: #2f6f4e; --accent-soft: #eaf3ee;
+    --call: #1f4e79; --call-soft: #eaf1f8; --err: #a8261f; --err-soft: #fbecea;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16171a; --panel: #1e2024; --ink: #e8e8e6; --muted: #9a9a97;
+      --line: #2e3136; --accent: #7fbf9a; --accent-soft: #1c2b23;
+      --call: #8ab6e0; --call-soft: #1a242e; --err: #e8867f; --err-soft: #2c1d1c;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.6 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  .wrap { max-width: 820px; margin: 0 auto; padding: 40px 20px 80px; }
+  header h1 { font-size: 20px; margin: 0 0 4px; letter-spacing: -.01em; }
+  header p { margin: 0 0 24px; color: var(--muted); font-size: 14px; }
+  header code { font-family: var(--mono); font-size: 13px; }
+
+  form { display: flex; gap: 8px; margin-bottom: 12px; }
+  input[type=text] {
+    flex: 1; padding: 11px 14px; border: 1px solid var(--line); border-radius: 8px;
+    background: var(--panel); color: var(--ink); font: inherit;
+  }
+  input[type=text]:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  button {
+    padding: 11px 18px; border: 0; border-radius: 8px; background: var(--accent);
+    color: #fff; font: inherit; font-weight: 600; cursor: pointer;
+  }
+  button:disabled { opacity: .5; cursor: default; }
+
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 28px; }
+  .chip {
+    border: 1px solid var(--line); background: var(--panel); color: var(--muted);
+    border-radius: 999px; padding: 5px 12px; font-size: 13px; cursor: pointer;
+  }
+  .chip:hover { color: var(--ink); border-color: var(--muted); }
+
+  .turn-label {
+    font-family: var(--mono); font-size: 11px; letter-spacing: .08em;
+    text-transform: uppercase; color: var(--muted);
+    margin: 22px 0 8px; display: flex; align-items: center; gap: 10px;
+  }
+  .turn-label::after {
+    content: ""; flex: 1; height: 1px; background: var(--line);
+  }
+
+  .step { border-left: 2px solid var(--line); padding: 0 0 0 16px; margin-bottom: 10px; }
+  .step.call { border-left-color: var(--call); }
+  .step.err  { border-left-color: var(--err); }
+
+  .call-line { font-family: var(--mono); font-size: 13px; color: var(--call); }
+  .call-line b { font-weight: 600; }
+  .args { color: var(--muted); }
+
+  .result {
+    font-family: var(--mono); font-size: 12px; color: var(--muted);
+    background: var(--call-soft); border-radius: 6px; padding: 8px 10px;
+    margin-top: 6px; white-space: pre-wrap; word-break: break-word;
+    max-height: 150px; overflow: auto;
+  }
+  .step.err .result { background: var(--err-soft); color: var(--err); }
+  .summary { font-size: 13px; color: var(--muted); margin-top: 4px; }
+
+  .answer {
+    background: var(--panel); border: 1px solid var(--line);
+    border-left: 3px solid var(--accent);
+    border-radius: 8px; padding: 4px 20px 18px; margin-top: 24px;
+  }
+  .answer p { margin: 14px 0; }
+  .answer ul { margin: 12px 0; padding-left: 20px; }
+  .answer li { margin: 6px 0; }
+  .answer code {
+    font-family: var(--mono); font-size: .88em;
+    background: var(--accent-soft); padding: 1px 5px; border-radius: 4px;
+  }
+  .usage {
+    font-family: var(--mono); font-size: 12px; color: var(--muted);
+    margin-top: 14px; padding-top: 12px; border-top: 1px dashed var(--line);
+  }
+  .thinking { color: var(--muted); font-size: 14px; margin-top: 18px; }
+  .dot { animation: blink 1.4s infinite; }
+  .dot:nth-child(2) { animation-delay: .2s; }
+  .dot:nth-child(3) { animation-delay: .4s; }
+  @keyframes blink { 0%, 60%, 100% { opacity: .25 } 30% { opacity: 1 } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>gh-issue-agent</h1>
+    <p>Claude decides which GitHub Issues API calls to make. Reading
+       <code id="repo">…</code> — every tool call appears below as it happens.</p>
+  </header>
+
+  <form id="form">
+    <input type="text" id="q" placeholder="Ask about the backlog…" autocomplete="off" required>
+    <button id="go" type="submit">Ask</button>
+  </form>
+  <div class="chips" id="chips"></div>
+
+  <div id="out"></div>
+</div>
+
+<script>
+const out = document.getElementById('out');
+const form = document.getElementById('form');
+const input = document.getElementById('q');
+const go = document.getElementById('go');
+let currentTurn = 0, source = null;
+
+fetch('/api/meta').then(r => r.json()).then(meta => {
+  document.getElementById('repo').textContent = meta.repo;
+  meta.suggestions.forEach(s => {
+    const b = document.createElement('button');
+    b.type = 'button'; b.className = 'chip'; b.textContent = s;
+    b.onclick = () => { input.value = s; form.requestSubmit(); };
+    document.getElementById('chips').appendChild(b);
+  });
+});
+
+function el(tag, cls, text) {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (text !== undefined) n.textContent = text;
+  return n;
+}
+
+function turnLabel(turn) {
+  if (turn === currentTurn) return;
+  currentTurn = turn;
+  out.appendChild(el('div', 'turn-label', `turn ${turn}`));
+}
+
+// A tool result is JSON. Show the shape, not 8KB of body text - the count
+// and the envelope keys are what make the model's next decision legible.
+function summarize(raw) {
+  try {
+    const d = JSON.parse(raw);
+    if ('count' in d) return `${d.count} issue${d.count === 1 ? '' : 's'}` +
+      (d.as_of ? ` · as of ${d.as_of.slice(0, 10)}` : '');
+    if ('comment_count' in d) return `${d.comment_count} comment` +
+      `${d.comment_count === 1 ? '' : 's'} on #${d.issue_number}`;
+  } catch (e) { /* fall through to raw preview */ }
+  return null;
+}
+
+// The model answers in markdown. Escape first, then handle the small subset
+// it actually uses - bold, inline code, and bullet lists. Escaping before
+// any tag is inserted is what keeps issue bodies from injecting markup.
+function markdown(src) {
+  const esc = src
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+  const html = esc
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    // Single asterisks only after bold has consumed the doubles.
+    .replace(/(^|[^*\w])\*([^*\n]+)\*/g, '$1<em>$2</em>')
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/(^|\n)\s*[-*]\s+(.+)/g, '$1<li>$2</li>')
+    .replace(/(^|\n)\s*(\d+)\.\s+(.+)/g, '$1<li>$2. $3</li>');
+
+  return html
+    .replace(/(<li>[\s\S]*?<\/li>)(?!\s*<li>)/g, '<ul>$1</ul>')
+    .replace(/\n{2,}/g, '</p><p>')
+    .replace(/\n/g, '<br>')
+    // Line breaks between list items are structural, not visual - a <br>
+    // inside a <ul> renders as an extra blank row.
+    .replace(/<\/li><br>/g, '</li>')
+    .replace(/^/, '<p>').replace(/$/, '</p>');
+}
+
+function onEvent(e) {
+  const ev = JSON.parse(e.data);
+
+  if (ev.type === 'tool_call') {
+    turnLabel(ev.turn);
+    const step = el('div', 'step call');
+    step.id = 'step-' + ev.id;
+    const line = el('div', 'call-line');
+    line.appendChild(el('b', null, ev.tool));
+    line.appendChild(el('span', 'args', '(' + JSON.stringify(ev.input) + ')'));
+    step.appendChild(line);
+    out.appendChild(step);
+  }
+
+  if (ev.type === 'tool_result') {
+    const step = document.getElementById('step-' + ev.id) || out;
+    if (ev.is_error) step.classList.add('err');
+    const summary = ev.is_error ? null : summarize(ev.content);
+    if (summary) step.appendChild(el('div', 'summary', '↳ ' + summary));
+    const body = el('div', 'result', ev.content.slice(0, 1200));
+    step.appendChild(body);
+  }
+
+  if (ev.type === 'answer' || ev.type === 'stopped') {
+    document.querySelectorAll('.thinking').forEach(n => n.remove());
+    const box = el('div', 'answer');
+    box.innerHTML = markdown(ev.text);
+    out.appendChild(box);
+    if (ev.usage) {
+      out.appendChild(el('div', 'usage',
+        `${ev.turn} turn${ev.turn === 1 ? '' : 's'} · ` +
+        `${ev.usage.input_tokens} in / ${ev.usage.output_tokens} out · ` +
+        `stop_reason=${ev.stop_reason}`));
+    }
+  }
+
+  if (ev.type === 'done') finish();
+}
+
+function finish() {
+  if (source) { source.close(); source = null; }
+  document.querySelectorAll('.thinking').forEach(n => n.remove());
+  go.disabled = false; go.textContent = 'Ask';
+}
+
+form.onsubmit = (e) => {
+  e.preventDefault();
+  if (source) source.close();
+  out.innerHTML = '';
+  currentTurn = 0;
+  go.disabled = true; go.textContent = 'Thinking…';
+
+  const wait = el('div', 'thinking');
+  wait.innerHTML = 'Planning<span class="dot">.</span><span class="dot">.</span><span class="dot">.</span>';
+  out.appendChild(wait);
+
+  source = new EventSource('/api/ask?q=' + encodeURIComponent(input.value));
+  source.onmessage = onEvent;
+  source.onerror = () => { finish(); };
+};
+</script>
+</body>
+</html>
